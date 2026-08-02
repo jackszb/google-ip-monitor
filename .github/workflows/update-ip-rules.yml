@@ -31,10 +31,10 @@ jobs:
       - name: Check for changes
         id: diff
         run: |
-          if git diff --quiet -- output/google-ip-rules.json; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
+          if [ -n "$(git status --porcelain -- output/google-ip-rules.json)" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Commit and push if changed
