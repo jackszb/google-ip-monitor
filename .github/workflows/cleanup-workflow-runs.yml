@@ -1,0 +1,115 @@
+# .github/workflows/cleanup-workflow-runs.yml
+#
+# 通用「定期清理 Actions 运行记录」workflow。
+# 把此文件放到任意仓库的 .github/workflows/ 目录下即可使用，无需修改仓库名，
+# 会自动作用于当前所在的仓库。
+#
+# 默认: 每天 UTC 0 点 (北京时间 8 点) 运行一次，保留每个 workflow 最近 10 条记录，
+# 并额外清理 90 天前的记录。每次运行都会扫描该 workflow 全部历史记录 (非增量)，
+# 所以即使仓库长期未清理，第一次运行也会把历史积压的记录一次性清完。
+# 可按需修改下方 env 和 cron。
+#
+# 权限要求: 仓库 Settings -> Actions -> General -> Workflow permissions
+# 需勾选 "Read and write permissions"，否则删除运行记录会因权限不足失败。
+
+name: Cleanup Workflow Runs
+
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 每天 UTC 0 点，可自行调整
+  workflow_dispatch:        # 支持手动触发
+    inputs:
+      keep:
+        description: '每个 workflow 保留的最近记录数'
+        required: false
+        default: '10'
+      days:
+        description: '删除多少天前的记录 (留空则不按天数清理)'
+        required: false
+        default: '90'
+      dry_run:
+        description: '是否只是预览而不实际删除 (true/false)'
+        required: false
+        default: 'false'
+
+permissions:
+  actions: write   # 删除运行记录必需
+  contents: read
+
+env:
+  KEEP: ${{ github.event.inputs.keep || '10' }}
+  DAYS: ${{ github.event.inputs.days || '90' }}
+  DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old workflow runs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          KEEP="${{ env.KEEP }}"
+          DAYS="${{ env.DAYS }}"
+          DRY_RUN="${{ env.DRY_RUN }}"
+
+          echo "仓库: $REPO | 保留: $KEEP 条 | 天数阈值: $DAYS 天 | dry_run: $DRY_RUN"
+
+          FLAGS=(-R "$REPO" -k "$KEEP" -y)
+          [[ -n "$DAYS" ]] && FLAGS+=(-d "$DAYS")
+          [[ "$DRY_RUN" == "true" ]] && FLAGS+=(-n)
+
+          # 直接内联执行清理逻辑 (等价于 clean-workflow-runs.sh 的核心部分)，
+          # 避免依赖仓库里额外脚本文件，保证该 yaml 可独立复制到任意仓库使用。
+          WF_LIST_JSON=$(gh api "repos/$REPO/actions/workflows" --paginate --jq '[.workflows[] | {id, name}]')
+          WF_COUNT=$(jq 'length' <<<"$WF_LIST_JSON")
+
+          CUTOFF_EPOCH=""
+          if [[ -n "$DAYS" ]]; then
+            CUTOFF_EPOCH=$(date -u -d "-${DAYS} days" +%s)
+          fi
+
+          TOTAL_DELETED=0
+          for i in $(seq 0 $((WF_COUNT - 1))); do
+            WF_ID=$(jq -r ".[$i].id" <<<"$WF_LIST_JSON")
+            WF_NAME=$(jq -r ".[$i].name" <<<"$WF_LIST_JSON")
+            echo "==> $WF_NAME (id: $WF_ID)"
+
+            RUNS_JSON=$(gh api "repos/$REPO/actions/workflows/$WF_ID/runs" \
+              --paginate --jq '.workflow_runs[] | {id, created_at}' | jq -s '.')
+            RUN_COUNT=$(jq 'length' <<<"$RUNS_JSON")
+
+            KEPT=0
+            for j in $(seq 0 $((RUN_COUNT - 1))); do
+              RUN=$(jq -c ".[$j]" <<<"$RUNS_JSON")
+              RUN_ID=$(jq -r '.id' <<<"$RUN")
+              RUN_CREATED=$(jq -r '.created_at' <<<"$RUN")
+
+              SHOULD_DELETE=false
+              if [[ $KEPT -ge $KEEP ]]; then
+                SHOULD_DELETE=true
+              fi
+              if [[ -n "$CUTOFF_EPOCH" ]]; then
+                RUN_EPOCH=$(date -u -d "$RUN_CREATED" +%s)
+                if [[ "$RUN_EPOCH" -lt "$CUTOFF_EPOCH" ]]; then
+                  SHOULD_DELETE=true
+                fi
+              fi
+
+              if $SHOULD_DELETE; then
+                if [[ "$DRY_RUN" == "true" ]]; then
+                  echo "    [DRY RUN] 将删除 run id: $RUN_ID (created: $RUN_CREATED)"
+                else
+                  gh api -X DELETE "repos/$REPO/actions/runs/$RUN_ID" >/dev/null 2>&1 \
+                    && { echo "    已删除 run id: $RUN_ID"; TOTAL_DELETED=$((TOTAL_DELETED + 1)); } \
+                    || echo "    删除失败 run id: $RUN_ID"
+                fi
+              else
+                KEPT=$((KEPT + 1))
+              fi
+            done
+          done
+
+          echo "完成，共删除 $TOTAL_DELETED 条记录。"
