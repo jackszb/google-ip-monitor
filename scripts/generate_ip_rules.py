@@ -31,7 +31,7 @@ SOURCES = {
 }
 
 OUTPUT_PATH = Path("output/google-ip-rules.json")
-OUTPUT_VERSION = 3
+OUTPUT_VERSION = 5
 REQUEST_TIMEOUT = 30
 
 
