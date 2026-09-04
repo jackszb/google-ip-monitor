@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 从 Google 官方 IP 段数据源(cloud.json + goog.json)提取所有 IPv4/IPv6 CIDR,
-合并去重排序后,生成指定格式的规则文件。
+合并去重、聚合(合并相邻网段/剔除被包含的子网段)、排序后,生成指定格式的规则文件。
 
 数据源:
   https://www.gstatic.com/ipranges/cloud.json
@@ -9,7 +9,7 @@
 
 输出格式:
 {
-  "version": 3,
+  "version": 5,
   "rules": [
     {
       "ip_cidr": [ "8.8.4.0/24", "8.8.8.0/24", ... ]   # IPv4 在前,IPv6 在后
@@ -70,6 +70,20 @@ def sort_key_v6(cidr: str):
     return (int(net.network_address), net.prefixlen)
 
 
+def aggregate_cidrs(cidr_set: set) -> list:
+    """
+    对一组 CIDR 做聚合(collapse):
+    - 若存在包含关系(如 A 是 B 的父网段),去掉冗余的子网段
+    - 若干相邻/连续的网段能合并成一个更大的网段时,合并之
+    返回聚合后的 CIDR 字符串列表(未排序)
+    """
+    if not cidr_set:
+        return []
+    networks = [ipaddress.ip_network(c, strict=False) for c in cidr_set]
+    collapsed = ipaddress.collapse_addresses(networks)
+    return [str(net) for net in collapsed]
+
+
 def main():
     all_ipv4 = set()
     all_ipv6 = set()
@@ -80,10 +94,16 @@ def main():
         all_ipv4 |= v4
         all_ipv6 |= v6
 
-    ipv4_sorted = sorted(all_ipv4, key=sort_key_v4)
-    ipv6_sorted = sorted(all_ipv6, key=sort_key_v6)
+    print(f"合并去重后: IPv4 {len(all_ipv4)} 条, IPv6 {len(all_ipv6)} 条, 共 {len(all_ipv4) + len(all_ipv6)} 条")
 
-    print(f"合并去重后: IPv4 {len(ipv4_sorted)} 条, IPv6 {len(ipv6_sorted)} 条, 共 {len(ipv4_sorted) + len(ipv6_sorted)} 条")
+    # IP 聚合:合并相邻/连续网段,剔除被包含的子网段
+    agg_ipv4 = aggregate_cidrs(all_ipv4)
+    agg_ipv6 = aggregate_cidrs(all_ipv6)
+
+    print(f"聚合后: IPv4 {len(agg_ipv4)} 条, IPv6 {len(agg_ipv6)} 条, 共 {len(agg_ipv4) + len(agg_ipv6)} 条")
+
+    ipv4_sorted = sorted(agg_ipv4, key=sort_key_v4)
+    ipv6_sorted = sorted(agg_ipv6, key=sort_key_v6)
 
     merged_cidr_list = ipv4_sorted + ipv6_sorted
 
